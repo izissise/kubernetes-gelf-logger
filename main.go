@@ -41,7 +41,7 @@ func getInode(filename string) uint64 {
   return inode
 }
 
-func gelfMessage(w *gelf.Writer, p []byte, hostname string, metadata map[string]interface{}) (n int, err error) {
+func gelfMessage(w *gelf.Writer, p []byte, facility string, hostname string, metadata map[string]interface{}) (n int, err error) {
   // remove trailing and leading whitespace
   p = bytes.TrimSpace(p)
 
@@ -63,7 +63,7 @@ func gelfMessage(w *gelf.Writer, p []byte, hostname string, metadata map[string]
     Full:     string(full),
     TimeUnix: float64(time.Now().Unix()),
     Level:    6, // info
-    Facility: w.Facility,
+    Facility: facility,
     Extra: metadata,
   }
 
@@ -89,7 +89,7 @@ func (kgl *Logger) fileUpdate(filename string) {
     size := len(line)
     strings.TrimRight(line, "\n")
     // Extra metadata parsing here
-    gelfMessage(kgl.writer, []byte(line), kgl.hostname, fi.metadata)
+    gelfMessage(kgl.writer, []byte(line), "KGL", kgl.hostname, fi.metadata)
     fi.seek = fi.seek + int64(size)
   }
   kgl.writeFileInfos()
