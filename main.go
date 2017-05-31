@@ -5,20 +5,13 @@ import (
   "github.com/fsnotify/fsnotify"
   "bytes"
   "syscall"
+  "strings"
   "time"
   "os"
   "log"
 )
 
-// # pos               inode
-// # ffffffffffffffff\tffffffffffffffff\n
-
-// account-2152481023-5v8wg_v1_account-38e0b2b97cb2bb1e337a6d3e89075a494a661aa9477a2815ae4d9eda473b0245
-// (_kubernetes_pod)_(_kubernetes_namespace)_(_kubernetes_container)_(_docker_container_id)
-
 // stream
-
-// tag: kubernetes.var.log.containers.account-2152481023-5v8wg_v1_account-38e0b2b97cb2bb1e337a6d3e89075a494a661aa9477a2815ae4d9eda473b0245.log
 
 type fileInfos struct {
   seek int64
@@ -42,7 +35,6 @@ func getInode(filename string) uint64 {
     panic(err)
   }
   inode := stat.Ino
-  log.Println(stat.Ino) // Remove this
   return inode
 }
 
@@ -123,7 +115,13 @@ func (kgl *Logger) newFile(filename string) {
   }
   fi.filename = filename
   fi.metadata = make(map[string]interface{})
-  // Parse filename infos
+  fields := strings.Split(filename, "_")
+  fi.metadata["_kubernetes_pod"] = fields[0]
+  fi.metadata["_kubernetes_namespace"] = fields[1]
+  subfields := strings.Split(fields[2], "-")
+  fi.metadata["_kubernetes_container"] = subfields[0]
+  fi.metadata["_docker_container_id"] = subfields[1]
+//   fi.metadata["stream"] = ??
   kgl.files[filename] = fi
 }
 
@@ -154,6 +152,10 @@ func (kgl *Logger) processFsEvents() {
         log.Println("error:", err)
     }
   }
+}
+
+func (kgl *Logger) writeFileInfos() {
+
 }
 
 func main() {
