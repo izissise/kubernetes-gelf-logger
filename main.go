@@ -37,9 +37,9 @@ type Logger struct {
 }
 
 type DockerLog struct {
-  log string
-  stream string
-  time time.Time
+  Log string
+  Stream string
+  Time time.Time
 }
 
 
@@ -78,7 +78,7 @@ func gelfMessageFromDockerJsonLog(w *gelf.Writer, p []byte , facility string, ho
   var dockLog DockerLog
   err = json.Unmarshal(p, &dockLog)
   if err != nil {
-    log.Printf("%s\n", err)
+    log.Printf("%s %s\n", err, p)
     return
   }
 
@@ -86,16 +86,17 @@ func gelfMessageFromDockerJsonLog(w *gelf.Writer, p []byte , facility string, ho
   // for the short message and set the full message to the
   // original input.  If the input has no newlines, stick the
   // whole thing in Short.
-  mess := []byte(dockLog.log)
+  strings.TrimRight(dockLog.Log, "\n")
+  mess := []byte(dockLog.Log)
   short := mess
   full := []byte("")
-  if i := bytes.IndexRune(p, '\n'); i > 0 {
+  if i := bytes.IndexRune(short, '\n'); i > 0 {
     short = mess[:i]
     full = mess
   }
 
   meta := make(map[string]interface{})
-  meta["stream"] = dockLog.stream
+  meta["stream"] = dockLog.Stream
   for k, v := range metadata {
     meta[k] = v
   }
@@ -104,7 +105,7 @@ func gelfMessageFromDockerJsonLog(w *gelf.Writer, p []byte , facility string, ho
     Host:     hostname,
     Short:    string(short),
     Full:     string(full),
-    TimeUnix: float64(dockLog.time.Unix()),
+    TimeUnix: float64(dockLog.Time.Unix()),
     Level:    6, // info
     Facility: facility,
     Extra: metadata,
