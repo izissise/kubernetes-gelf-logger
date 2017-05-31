@@ -7,3 +7,5 @@ PRs are welcome
 
 # Environment variables used by the image:
 - `GELF_ADDR` - Log server address (127.0.0.1:12201).
+
+Prebuild image: `docker pull izissise/kubernetes-gelf-logger`
