@@ -37,9 +37,9 @@ type Logger struct {
 }
 
 type DockerLog struct {
-  Log string
-  Stream string
-  Time time.Time
+  Log string `json:"log"`
+  Stream string `json:"stream"`
+  Time time.Time `json:"time"`
 }
 
 
@@ -133,7 +133,9 @@ func (kgl *Logger) fileUpdate(filename string) {
     size := len(line)
     strings.TrimRight(line, "\n")
     // Extra metadata parsing here
-    gelfMessageFromDockerJsonLog(kgl.writer, []byte(line), "KGL", kgl.hostname, fi.metadata)
+    if len(line) > 0 {
+      gelfMessageFromDockerJsonLog(kgl.writer, []byte(line), "KGL", kgl.hostname, fi.metadata)
+    }
     fi.seek = fi.seek + int64(size)
   }
   kgl.writeFileInfos()
