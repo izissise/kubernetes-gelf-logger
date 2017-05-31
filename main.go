@@ -209,7 +209,7 @@ func main() {
   nbGoRoutine := 0
 
   logDirectory := "/var/log/containers"
-  posFile := "/var/log/containers/es-containers.log.pos"
+  posFile := "/var/log/es-containers.log.pos"
   kgl := new(Logger)
   kgl.files = make(map[string]*fileInfos)
   f, err := os.OpenFile(posFile, os.O_RDWR | os.O_CREATE, 0666)
