@@ -5,6 +5,7 @@ import (
   "github.com/fsnotify/fsnotify"
   "encoding/hex"
   "encoding/binary"
+  "encoding/json"
   "bytes"
   "bufio"
   "syscall"
@@ -33,6 +34,12 @@ type Logger struct {
   dirWatcher *fsnotify.Watcher
   filesWatcher *fsnotify.Watcher
   realFilesMap map[string]string
+}
+
+type DockerLog struct {
+  log string
+  stream string
+  time time.Time
 }
 
 
@@ -67,27 +74,37 @@ func getInode(filename string) uint64 {
   return inode
 }
 
-func gelfMessage(w *gelf.Writer, p []byte, facility string, hostname string, metadata map[string]interface{}) (n int, err error) {
-  // remove trailing and leading whitespace
-  p = bytes.TrimSpace(p)
+func gelfMessageFromDockerJsonLog(w *gelf.Writer, p []byte , facility string, hostname string, metadata map[string]interface{}) (n int, err error) {
+  var dockLog DockerLog
+  err = json.Unmarshal(p, &dockLog)
+  if err != nil {
+    log.Printf("%s\n", err)
+    return
+  }
 
   // If there are newlines in the message, use the first line
   // for the short message and set the full message to the
   // original input.  If the input has no newlines, stick the
   // whole thing in Short.
-  short := p
+  mess := []byte(dockLog.log)
+  short := mess
   full := []byte("")
   if i := bytes.IndexRune(p, '\n'); i > 0 {
-    short = p[:i]
-    full = p
+    short = mess[:i]
+    full = mess
   }
 
+  meta := make(map[string]interface{})
+  meta["stream"] = dockLog.stream
+  for k, v := range metadata {
+    meta[k] = v
+  }
   m := gelf.Message{
     Version:  "1.1",
     Host:     hostname,
     Short:    string(short),
     Full:     string(full),
-    TimeUnix: float64(time.Now().Unix()),
+    TimeUnix: float64(dockLog.time.Unix()),
     Level:    6, // info
     Facility: facility,
     Extra: metadata,
@@ -115,7 +132,7 @@ func (kgl *Logger) fileUpdate(filename string) {
     size := len(line)
     strings.TrimRight(line, "\n")
     // Extra metadata parsing here
-    gelfMessage(kgl.writer, []byte(line), "KGL", kgl.hostname, fi.metadata)
+    gelfMessageFromDockerJsonLog(kgl.writer, []byte(line), "KGL", kgl.hostname, fi.metadata)
     fi.seek = fi.seek + int64(size)
   }
   kgl.writeFileInfos()
@@ -252,6 +269,8 @@ func main() {
   logDirectory := "/var/log/containers"
   posFile := "/var/log/es-containers.log.pos"
   kgl := new(Logger)
+  host, _ := os.Hostname()
+  kgl.hostname = host
   kgl.realFilesMap = make(map[string]string)
   kgl.files = make(map[string]*fileInfos)
   f, err := os.OpenFile(posFile, os.O_RDWR | os.O_CREATE, 0666)
