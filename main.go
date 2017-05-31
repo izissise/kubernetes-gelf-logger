@@ -3,7 +3,10 @@ package main
 import (
   "github.com/Graylog2/go-gelf/gelf"
   "github.com/fsnotify/fsnotify"
+  "encoding/hex"
+  "encoding/binary"
   "bytes"
+  "bufio"
   "syscall"
   "strings"
   "regexp"
@@ -72,7 +75,11 @@ func gelfMessage(w *gelf.Writer, p []byte, hostname string, metadata map[string]
 func (kgl *Logger) fileUpdate(filename string) {
   fi := kgl.files[filename]
   if fi == nil {
-    return
+    kgl.newFile(filename)
+    fi = kgl.files[filename]
+    if fi == nil {
+      panic("What")
+    }
   }
   buff := make([]byte, 4096)
   size, err := fi.file.Read(buff)
@@ -122,7 +129,6 @@ func (kgl *Logger) newFile(filename string) {
   subfields := strings.Split(fields[2], "-")
   fi.metadata["_kubernetes_container"] = subfields[0]
   fi.metadata["_docker_container_id"] = subfields[1]
-//   fi.metadata["stream"] = ??
   kgl.files[filename] = fi
 }
 
@@ -159,7 +165,46 @@ func (kgl *Logger) processFsEvents() {
 }
 
 func (kgl *Logger) writeFileInfos() {
+  kgl.posFile.Truncate(0)
+  kgl.posFile.Seek(0, 0)
+  for k := range kgl.files {
+    var line string
+    tmp := make([]byte, 8)
+    infos := kgl.files[k]
+    binary.BigEndian.PutUint64(tmp, uint64(infos.seek))
+    seekStr := hex.EncodeToString(tmp)
+    binary.BigEndian.PutUint64(tmp, infos.inode)
+    inodeStr := hex.EncodeToString(tmp)
+    line = infos.filename + " " + seekStr + " " + inodeStr + "\n"
+    kgl.posFile.WriteString(line)
+  }
+}
 
+func (kgl *Logger) readFileInfos() {
+  scanner := bufio.NewScanner(kgl.posFile)
+  for scanner.Scan() {
+    fi := new(fileInfos);
+    line := scanner.Text()
+    if len(line) == 0 {
+      continue
+    }
+    fields := strings.Fields(line)
+    if len(fields) != 3 || len(fields[1]) != 16 || len(fields[2]) != 16 {
+      panic("Malformed position file")
+    }
+    filename := fields[0]
+    fi.filename = filename
+    tmp, err1 := hex.DecodeString(fields[1])
+    seek := binary.BigEndian.Uint64(tmp)
+    tmp, err2 := hex.DecodeString(fields[2])
+    inode := binary.BigEndian.Uint64(tmp)
+    if err1 != nil || err2 != nil {
+      panic(err1)
+    }
+    fi.seek = int64(seek)
+    fi.inode = inode
+    kgl.files[filename] = fi
+  }
 }
 
 func main() {
@@ -167,8 +212,16 @@ func main() {
   nbGoRoutine := 0
 
   logDirectory := "/var/log/containers"
+  posFile := "/var/log/containers/es-containers.log.pos"
   kgl := new(Logger)
   kgl.files = make(map[string]*fileInfos)
+  f, err := os.OpenFile(posFile, os.O_RDWR | os.O_CREATE, 0666)
+  if (err != nil) {
+    panic(err)
+  }
+  defer f.Close()
+  kgl.posFile = f
+  kgl.readFileInfos()
 
   gelfAddr := os.Getenv("GELF_ADDR")
   if gelfAddr == "" {
@@ -199,4 +252,3 @@ func main() {
     <- finish
   }
 }
-
