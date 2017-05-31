@@ -20,6 +20,7 @@ type fileInfos struct {
   inode uint64
   filename string
   file *os.File
+  reader *bufio.Reader
   metadata map[string]interface{}
 }
 
@@ -74,29 +75,24 @@ func gelfMessage(w *gelf.Writer, p []byte, hostname string, metadata map[string]
 
 func (kgl *Logger) fileUpdate(filename string) {
   fi := kgl.files[filename]
-  if fi == nil {
+  if fi == nil || fi.reader == nil {
     kgl.newFile(filename)
     fi = kgl.files[filename]
     if fi == nil {
       panic("What")
     }
   }
-  buff := make([]byte, 4096)
-  size, err := fi.file.Read(buff)
-  if (err == nil) {
+  var errB error
+  for errB == nil {
+    line, err := fi.reader.ReadString('\n')
+    errB = err
+    size := len(line)
+    strings.TrimRight(line, "\n")
     // Extra metadata parsing here
-
-    gelfMessage(kgl.writer, buff[:size], kgl.hostname, fi.metadata)
-//     // Find the current position by getting the
-//     // return value from Seek after moving 0 bytes
-//     currentPosition, err := fi.file.Seek(0, 1)
-//     if (err != nil) {
-//       panic(err)
-//     }
-    currentPosition := fi.seek + int64(size)
-    fi.seek = currentPosition;
-    kgl.writeFileInfos()
+    gelfMessage(kgl.writer, []byte(line), kgl.hostname, fi.metadata)
+    fi.seek = fi.seek + int64(size)
   }
+  kgl.writeFileInfos()
 }
 
 func (kgl *Logger) newFile(filename string) {
@@ -122,6 +118,7 @@ func (kgl *Logger) newFile(filename string) {
     }
   }
   fi.filename = filename
+  fi.reader = bufio.NewReader(fi.file)
   fi.metadata = make(map[string]interface{})
   fields := strings.Split(filename, "_")
   fi.metadata["_kubernetes_pod"] = fields[0]
