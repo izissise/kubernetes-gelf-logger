@@ -6,12 +6,11 @@ import (
   "bytes"
   "syscall"
   "strings"
+  "regexp"
   "time"
   "os"
   "log"
 )
-
-// stream
 
 type fileInfos struct {
   seek int64
@@ -78,6 +77,8 @@ func (kgl *Logger) fileUpdate(filename string) {
   buff := make([]byte, 4096)
   size, err := fi.file.Read(buff)
   if (err == nil) {
+    // Extra metadata parsing here
+
     gelfMessage(kgl.writer, buff[:size], kgl.hostname, fi.metadata)
 //     // Find the current position by getting the
 //     // return value from Seek after moving 0 bytes
@@ -127,11 +128,11 @@ func (kgl *Logger) newFile(filename string) {
 
 func (kgl *Logger) unfollowFile(filename string) {
   fi := kgl.files[filename]
-  log.Printf("Unfollow %s\n", filename)
   if (fi != nil) {
     fi.file.Close()
     kgl.writeFileInfos()
     delete(kgl.files, filename)
+    log.Printf("Unfollow %s\n", filename)
   }
 }
 
@@ -139,14 +140,17 @@ func (kgl *Logger) processFsEvents() {
   for {
     select {
       case event := <-kgl.watcher.Events:
-        fileName := event.Name
-        if (event.Op & fsnotify.Create == fsnotify.Create) {
-          kgl.newFile(fileName)
-        }
-        if ((event.Op & fsnotify.Create == fsnotify.Create) || (event.Op & fsnotify.Write == fsnotify.Write)) {
-          kgl.fileUpdate(fileName)
-        } else {
-          kgl.unfollowFile(fileName) // Probably a log rotate
+        filename := event.Name
+        matched, _ := regexp.MatchString(".+log$", filename)
+        if matched {
+          if (event.Op & fsnotify.Create == fsnotify.Create) {
+            kgl.newFile(filename)
+          }
+          if ((event.Op & fsnotify.Create == fsnotify.Create) || (event.Op & fsnotify.Write == fsnotify.Write)) {
+            kgl.fileUpdate(filename)
+          } else {
+            kgl.unfollowFile(filename) // Probably a log rotate
+          }
         }
       case err := <-kgl.watcher.Errors:
         log.Println("error:", err)
