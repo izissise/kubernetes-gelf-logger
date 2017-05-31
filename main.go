@@ -11,6 +11,7 @@ import (
   "strings"
   "regexp"
   "time"
+  "io/ioutil"
   "os"
   "log"
 )
@@ -29,7 +30,32 @@ type Logger struct {
   posFile *os.File
   hostname string
   writer *gelf.Writer
-  watcher *fsnotify.Watcher
+  dirWatcher *fsnotify.Watcher
+  filesWatcher *fsnotify.Watcher
+  realFilesMap map[string]string
+}
+
+
+func inverseMap(m map[string]string, value string) string {
+  for k, v := range m {
+    if v == value {
+      return k
+    }
+  }
+  return ""
+}
+
+func isLogFile(filename string) bool {
+  matched, _ := regexp.MatchString(".+log$", filename)
+  return matched
+}
+
+func readSymlink(path string) string {
+  link, err := os.Readlink(path)
+  if err != nil {
+    return path
+  }
+  return link
 }
 
 func getInode(filename string) uint64 {
@@ -95,14 +121,15 @@ func (kgl *Logger) fileUpdate(filename string) {
   kgl.writeFileInfos()
 }
 
-func (kgl *Logger) newFile(filename string) {
-  f, err := os.OpenFile(filename, os.O_RDONLY, 0000)
+func (kgl *Logger) newFile(filename string) *fileInfos {
+  realFile := readSymlink(filename)
+  f, err := os.OpenFile(realFile, os.O_RDONLY, 0000)
   if (err != nil) {
     panic(err)
   }
   log.Printf("New file %s\n", filename)
   fi := kgl.files[filename]
-  inode := getInode(filename)
+  inode := getInode(realFile)
   if fi == nil {
     fi = new(fileInfos);
     fi.seek = 0
@@ -127,6 +154,10 @@ func (kgl *Logger) newFile(filename string) {
   fi.metadata["_kubernetes_container"] = subfields[0]
   fi.metadata["_docker_container_id"] = subfields[1]
   kgl.files[filename] = fi
+
+  kgl.filesWatcher.Add(realFile) // Add watcher
+  kgl.realFilesMap[realFile] = filename // Add in map
+  return fi
 }
 
 func (kgl *Logger) unfollowFile(filename string) {
@@ -142,20 +173,30 @@ func (kgl *Logger) unfollowFile(filename string) {
 func (kgl *Logger) processFsEvents() {
   for {
     select {
-      case event := <-kgl.watcher.Events:
+      // Symlink dir events
+      case event := <-kgl.dirWatcher.Events:
         filename := event.Name
-        matched, _ := regexp.MatchString(".+log$", filename)
-        if matched {
-          if (event.Op & fsnotify.Create == fsnotify.Create) {
+        if isLogFile(filename) {
+          if (event.Op & fsnotify.Create == fsnotify.Create || (event.Op & fsnotify.Write == fsnotify.Write)) {
             kgl.newFile(filename)
-          }
-          if ((event.Op & fsnotify.Create == fsnotify.Create) || (event.Op & fsnotify.Write == fsnotify.Write)) {
-            kgl.fileUpdate(filename)
           } else {
-            kgl.unfollowFile(filename) // Probably a log rotate
+            realFile := inverseMap(kgl.realFilesMap, filename)
+            kgl.filesWatcher.Remove(realFile) // Remove watch
+            delete(kgl.realFilesMap, realFile) // Remove from map
           }
         }
-      case err := <-kgl.watcher.Errors:
+      case err := <-kgl.dirWatcher.Errors:
+        log.Println("error:", err)
+
+      // Files events
+      case event := <-kgl.filesWatcher.Events:
+        filename := event.Name
+        if ((event.Op & fsnotify.Create == fsnotify.Create) || (event.Op & fsnotify.Write == fsnotify.Write)) {
+          kgl.fileUpdate(kgl.realFilesMap[filename])
+        } else {
+          kgl.unfollowFile(kgl.realFilesMap[filename]) // Probably a log rotate
+        }
+      case err := <-kgl.filesWatcher.Errors:
         log.Println("error:", err)
     }
   }
@@ -211,6 +252,7 @@ func main() {
   logDirectory := "/var/log/containers"
   posFile := "/var/log/es-containers.log.pos"
   kgl := new(Logger)
+  kgl.realFilesMap = make(map[string]string)
   kgl.files = make(map[string]*fileInfos)
   f, err := os.OpenFile(posFile, os.O_RDWR | os.O_CREATE, 0666)
   if (err != nil) {
@@ -227,12 +269,26 @@ func main() {
   gelfWriter, err := gelf.NewWriter(gelfAddr)
   kgl.writer = gelfWriter
 
-  watcher, err := fsnotify.NewWatcher()
+  filesWatcher, err := fsnotify.NewWatcher()
   if err != nil {
     log.Fatal(err)
   }
-  defer watcher.Close()
-  kgl.watcher = watcher
+  defer filesWatcher.Close()
+  kgl.filesWatcher = filesWatcher
+
+  files, _ := ioutil.ReadDir(logDirectory)
+  for _, f := range files {
+    if isLogFile(f.Name()) && !f.IsDir() {
+      kgl.newFile(logDirectory + "/" + f.Name())
+    }
+  }
+
+  dirWatcher, err := fsnotify.NewWatcher()
+  if err != nil {
+    log.Fatal(err)
+  }
+  defer dirWatcher.Close()
+  kgl.dirWatcher = dirWatcher
 
   nbGoRoutine += 1
   go func() {
@@ -240,7 +296,7 @@ func main() {
     finish <- struct{}{}
   }()
 
-  err = kgl.watcher.Add(logDirectory)
+  err = kgl.dirWatcher.Add(logDirectory)
   if err != nil {
     log.Fatal(err)
   }
