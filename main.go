@@ -4,6 +4,7 @@ import (
   "github.com/Graylog2/go-gelf/gelf"
   "github.com/fsnotify/fsnotify"
   "bytes"
+  "syscall"
   "time"
   "os"
   "log"
@@ -20,21 +21,32 @@ import (
 // tag: kubernetes.var.log.containers.account-2152481023-5v8wg_v1_account-38e0b2b97cb2bb1e337a6d3e89075a494a661aa9477a2815ae4d9eda473b0245.log
 
 type fileInfos struct {
-  seek uint64
+  seek int64
   inode uint64
   filename string
   file *os.File
   metadata map[string]interface{}
 }
 
-type loggerData struct {
+type Logger struct {
   files map[string]*fileInfos
+  posFile *os.File
   hostname string
   writer *gelf.Writer
   watcher *fsnotify.Watcher
 }
 
-func logContainerMessage(w *gelf.Writer, p []byte, hostname string, metadata map[string]interface{}) (n int, err error) {
+func getInode(filename string) uint64 {
+  var stat syscall.Stat_t
+  if err := syscall.Stat(filename, &stat); err != nil {
+    panic(err)
+  }
+  inode := stat.Ino
+  log.Println(stat.Ino) // Remove this
+  return inode
+}
+
+func gelfMessage(w *gelf.Writer, p []byte, hostname string, metadata map[string]interface{}) (n int, err error) {
   // remove trailing and leading whitespace
   p = bytes.TrimSpace(p)
 
@@ -63,62 +75,80 @@ func logContainerMessage(w *gelf.Writer, p []byte, hostname string, metadata map
   if err = w.WriteMessage(&m); err != nil {
     return 0, err
   }
-  log.Printf("%s", m.Short) // Remove this
-
   return len(p), nil
 }
 
-func writeFileInfos(files map[string]*fileInfos) {
-
-}
-
-func fileUpdate(kgl *loggerData, filename string) {
+func (kgl *Logger) fileUpdate(filename string) {
   fi := kgl.files[filename]
+  if fi == nil {
+    return
+  }
   buff := make([]byte, 4096)
   size, err := fi.file.Read(buff)
   if (err == nil) {
-    logContainerMessage(kgl.writer, buff[:size], kgl.hostname, fi.metadata)
-    // Update seek value
-    writeFileInfos(kgl.files)
+    gelfMessage(kgl.writer, buff[:size], kgl.hostname, fi.metadata)
+//     // Find the current position by getting the
+//     // return value from Seek after moving 0 bytes
+//     currentPosition, err := fi.file.Seek(0, 1)
+//     if (err != nil) {
+//       panic(err)
+//     }
+    currentPosition := fi.seek + int64(size)
+    fi.seek = currentPosition;
+    kgl.writeFileInfos()
   }
 }
 
-func newFile(kgl *loggerData, filename string) {
-  f, err := os.Open(filename)
+func (kgl *Logger) newFile(filename string) {
+  f, err := os.OpenFile(filename, os.O_RDONLY, 0000)
   if (err != nil) {
     panic(err)
   }
-  fi := new(fileInfos);
+  log.Printf("New file %s\n", filename)
+  fi := kgl.files[filename]
+  inode := getInode(filename)
+  if fi == nil {
+    fi = new(fileInfos);
+    fi.seek = 0
+    fi.inode = inode // Set Inode
+  }
   fi.file = f
-  fi.seek = 0 // retrieve seek position
-//   f.Seek(6, 0)
-  fi.inode = 0 // Inode
+  if fi.inode != inode {
+    fi.inode = inode // Update inode
+  } else {
+    _, err = fi.file.Seek(fi.seek, 0) // Seek to position
+    if (err != nil) {
+      panic(err)
+    }
+  }
   fi.filename = filename
-  fi.metadata = make(map[string]interface{}) // Parse filename infos
+  fi.metadata = make(map[string]interface{})
+  // Parse filename infos
   kgl.files[filename] = fi
 }
 
-func unfollowFile(kgl *loggerData, filename string) {
+func (kgl *Logger) unfollowFile(filename string) {
   fi := kgl.files[filename]
+  log.Printf("Unfollow %s\n", filename)
   if (fi != nil) {
     fi.file.Close()
-    writeFileInfos(kgl.files)
+    kgl.writeFileInfos()
     delete(kgl.files, filename)
   }
 }
 
-func processFsEvents(kgl *loggerData) {
+func (kgl *Logger) processFsEvents() {
   for {
     select {
       case event := <-kgl.watcher.Events:
         fileName := event.Name
         if (event.Op & fsnotify.Create == fsnotify.Create) {
-          newFile(kgl, fileName)
+          kgl.newFile(fileName)
         }
         if ((event.Op & fsnotify.Create == fsnotify.Create) || (event.Op & fsnotify.Write == fsnotify.Write)) {
-          fileUpdate(kgl, fileName)
+          kgl.fileUpdate(fileName)
         } else {
-          unfollowFile(kgl, fileName) // Probably a log rotate
+          kgl.unfollowFile(fileName) // Probably a log rotate
         }
       case err := <-kgl.watcher.Errors:
         log.Println("error:", err)
@@ -131,7 +161,7 @@ func main() {
   nbGoRoutine := 0
 
   logDirectory := "/var/log/containers"
-  kgl := new(loggerData)
+  kgl := new(Logger)
   kgl.files = make(map[string]*fileInfos)
 
   gelfAddr := os.Getenv("GELF_ADDR")
@@ -150,7 +180,7 @@ func main() {
 
   nbGoRoutine += 1
   go func() {
-    processFsEvents(kgl)
+    kgl.processFsEvents()
     finish <- struct{}{}
   }()
 
