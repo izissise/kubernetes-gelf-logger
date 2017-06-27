@@ -11,6 +11,7 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"syscall"
@@ -71,6 +72,33 @@ func getInode(filename string) uint64 {
 	}
 	inode := stat.Ino
 	return inode
+}
+
+func containerLabelsFromDir(dir string) map[string]interface{} {
+	configPath := filepath.Join(dir, "config.v2.json")
+	p, err := ioutil.ReadFile(configPath)
+	if err != nil {
+		panic(err)
+	}
+	var config map[string]interface{}
+	err = json.Unmarshal(p, &config)
+	if err != nil {
+		log.Printf("%s\n", p)
+		panic(err)
+	}
+	subConfig := config["Config"].(map[string]interface{})
+	label := subConfig["Labels"].(map[string]interface{})
+	return label
+}
+
+func kubernetesInfo(containerLabels map[string]interface{}) map[string]interface{} {
+	infos := make(map[string]interface{})
+
+	infos["_kubernetes_pod"] = containerLabels["io.kubernetes.pod.name"]
+	infos["_kubernetes_namespace"] = containerLabels["io.kubernetes.pod.namespace"]
+	infos["_kubernetes_container"] = containerLabels["io.kubernetes.container.name"]
+
+	return infos
 }
 
 func gelfMessageFromDockerJsonLog(w *gelf.Writer, p []byte, facility string, hostname string, metadata map[string]interface{}) (n int, err error) {
@@ -165,15 +193,12 @@ func (kgl *Logger) newFile(filename string) *fileInfos {
 	}
 	fi.filename = filename
 	fi.reader = bufio.NewReader(fi.file)
-	fi.metadata = make(map[string]interface{})
-	fields := strings.Split(filename, "_")
-	fi.metadata["_kubernetes_pod"] = fields[0]
-	fi.metadata["_kubernetes_namespace"] = fields[1]
-	subfields := strings.Split(fields[2], "-")
-	fi.metadata["_kubernetes_container"] = subfields[0]
-	fi.metadata["_docker_container_id"] = subfields[1]
-	kgl.files[filename] = fi
 
+	// Retrieve kubernetes infos
+	dir, _ := filepath.Split(realFile)
+	fi.metadata = kubernetesInfo(containerLabelsFromDir(dir))
+	fi.metadata["_docker_container_id"] = filepath.Base(dir)
+	kgl.files[filename] = fi
 	kgl.filesWatcher.Add(realFile)        // Add watcher
 	kgl.realFilesMap[realFile] = filename // Add in map
 	return fi
