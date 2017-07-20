@@ -62,7 +62,7 @@ func readSymlink(path string) string {
 	if err != nil {
 		return path
 	}
-	return link
+	return readSymlink(link)
 }
 
 func getInode(filename string) (uint64, error) {
@@ -303,7 +303,7 @@ func main() {
 	nbGoRoutine := 0
 
 	logDirectory := "/var/log/containers"
-	posFile := "/var/log/es-containers.log.pos"
+	posFile := "/var/tmp/es-containers.log.pos"
 	kgl := new(Logger)
 	host, _ := os.Hostname()
 	kgl.hostname = host
