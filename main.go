@@ -65,30 +65,30 @@ func readSymlink(path string) string {
 	return link
 }
 
-func getInode(filename string) uint64 {
+func getInode(filename string) (uint64, error) {
 	var stat syscall.Stat_t
 	if err := syscall.Stat(filename, &stat); err != nil {
-		panic(err)
+		return 0, err
 	}
 	inode := stat.Ino
-	return inode
+	return inode, nil
 }
 
-func containerLabelsFromDir(dir string) map[string]interface{} {
+func containerLabelsFromDir(dir string) (map[string]interface{}, error) {
 	configPath := filepath.Join(dir, "config.v2.json")
 	p, err := ioutil.ReadFile(configPath)
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
 	var config map[string]interface{}
 	err = json.Unmarshal(p, &config)
 	if err != nil {
 		log.Printf("%s\n", p)
-		panic(err)
+		return nil, err
 	}
 	subConfig := config["Config"].(map[string]interface{})
 	label := subConfig["Labels"].(map[string]interface{})
-	return label
+	return label, nil
 }
 
 func kubernetesInfo(containerLabels map[string]interface{}) map[string]interface{} {
@@ -106,7 +106,7 @@ func gelfMessageFromDockerJsonLog(w *gelf.Writer, p []byte, facility string, hos
 	err = json.Unmarshal(p, &dockLog)
 	if err != nil {
 		log.Printf("%s %s\n", err, p)
-		return
+		return 0, err
 	}
 
 	// If there are newlines in the message, use the first line
@@ -150,7 +150,7 @@ func (kgl *Logger) fileUpdate(filename string) {
 		kgl.newFile(filename)
 		fi = kgl.files[filename]
 		if fi == nil {
-			panic("What")
+			panic("Major problem, internal state corruption")
 		}
 	}
 	var errB error
@@ -168,15 +168,18 @@ func (kgl *Logger) fileUpdate(filename string) {
 	kgl.writeFileInfos()
 }
 
-func (kgl *Logger) newFile(filename string) *fileInfos {
+func (kgl *Logger) newFile(filename string) (*fileInfos, error) {
 	realFile := readSymlink(filename)
 	f, err := os.OpenFile(realFile, os.O_RDONLY, 0000)
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
 	log.Printf("New file %s\n", filename)
 	fi := kgl.files[filename]
-	inode := getInode(realFile)
+	inode, err := getInode(realFile)
+	if err != nil {
+		log.Printf("%s can't read inode number, continuing...", realFile)
+	}
 	if fi == nil {
 		fi = new(fileInfos)
 		fi.seek = 0
@@ -188,7 +191,7 @@ func (kgl *Logger) newFile(filename string) *fileInfos {
 	} else {
 		_, err = fi.file.Seek(fi.seek, 0) // Seek to position
 		if err != nil {
-			panic(err)
+			log.Printf("%s can't seek to position, continuing...", realFile)
 		}
 	}
 	fi.filename = filename
@@ -196,12 +199,18 @@ func (kgl *Logger) newFile(filename string) *fileInfos {
 
 	// Retrieve kubernetes infos
 	dir, _ := filepath.Split(realFile)
-	fi.metadata = kubernetesInfo(containerLabelsFromDir(dir))
+	kubeInfos, err := containerLabelsFromDir(dir)
+	if err != nil {
+		log.Printf("Missing metadata file for %s\n", filepath.Base(dir))
+		fi.metadata = make(map[string]interface{})
+	} else {
+		fi.metadata = kubernetesInfo(kubeInfos)
+	}
 	fi.metadata["_docker_container_id"] = filepath.Base(dir)
 	kgl.files[filename] = fi
 	kgl.filesWatcher.Add(realFile)        // Add watcher
 	kgl.realFilesMap[realFile] = filename // Add in map
-	return fi
+	return fi, nil
 }
 
 func (kgl *Logger) unfollowFile(filename string) {
